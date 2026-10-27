@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cabina</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="bar">
+    <div class="brand"><div class="logo" aria-hidden="true"></div><b>Cabina</b></div>
+    <div class="status" id="status" title="Salida de audio">
+      <span id="stDevice">Iniciando audio…</span>
+      <span id="stFormat"></span>
+      <span id="stLatency"></span>
+      <span id="stLoad"></span>
+    </div>
+    <div class="tools">
+      <button id="qBtn" class="btn on" aria-pressed="true" title="Cuantizar: cues, loops y saltos caen en el beat">Q</button>
+      <div class="master-meter" aria-label="Nivel master"><i id="mmL"></i><i id="mmR"></i></div>
+      <span class="lim" id="limInd" title="El limitador está actuando">LIM</span>
+      <button id="settingsBtn" class="btn icon" aria-label="Ajustes de audio" title="Ajustes de audio">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1L15 3.5h-4l-.4 2.5a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4L6.6 11a7.5 7.5 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.6 7.6 0 0 0 1.7-1l2.4 1 2-3.4zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <section class="waves" aria-label="Ondas ampliadas">
+    <div class="wave-row" data-deck="0" style="--c:var(--deck-1)"><div class="wave-tag">1</div><canvas id="zoom0"></canvas></div>
+    <div class="phase" aria-label="Fase entre platos"><canvas id="phase"></canvas></div>
+    <div class="wave-row" data-deck="1" style="--c:var(--deck-2)"><div class="wave-tag">2</div><canvas id="zoom1"></canvas></div>
+    <div class="zoom-ctl"><button class="btn" id="zOut" aria-label="Alejar onda">−</button><button class="btn" id="zIn" aria-label="Acercar onda">+</button></div>
+  </section>
+
+  <section class="booth" id="booth"></section>
+
+  <section class="lib panel" id="lib">
+    <div class="lib-head">
+      <h2>Colección<small id="libCount"></small></h2>
+      <span class="lib-progress" id="libProgress"></span>
+      <div class="lib-tools">
+        <button class="btn" id="removeBtn" hidden>Quitar de la colección</button>
+        <button class="btn" id="reanalyzeBtn" hidden>Reanalizar</button>
+        <input id="search" class="search" type="search" placeholder="Buscar título, artista, tono…" autocomplete="off">
+        <button class="btn" id="addFilesBtn">Añadir archivos</button>
+        <button class="btn primary" id="addFolderBtn">Añadir carpeta</button>
+      </div>
+    </div>
+    <div class="table" id="table">
+      <div class="thead" id="thead"></div>
+      <div class="tbody" id="tbody" tabindex="0"><div class="spacer" id="spacer"></div><div class="rows" id="rows"></div></div>
+      <div class="empty" id="empty" hidden>
+        <p class="empty-title">Tu colección está vacía</p>
+        <p>Pulsa <b>Añadir carpeta</b> y elige la carpeta donde guardas tu música, o arrastra archivos y carpetas a la ventana. Cabina analiza el BPM, la rejilla, la tonalidad y el volumen de cada pista.</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="drag-ghost" id="ghost" hidden></div>
+<div class="drop-hint" id="dropHint" hidden>Suelta para añadir a la colección</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<div class="modal" id="settings" hidden>
+  <form class="settings" id="settingsForm" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <h2 id="settingsTitle">Ajustes</h2>
+    <section>
+      <h3>Salida de audio</h3>
+      <label class="row" for="setDevice"><span>Dispositivo</span><select id="setDevice"></select></label>
+      <label class="row" for="setBuffer"><span>Tamaño de buffer</span><select id="setBuffer"></select></label>
+      <p class="note" id="setInfo"></p>
+      <label class="row" for="setRouting"><span>Auriculares (cue)</span>
+        <select id="setRouting">
+          <option value="1">Salidas 3/4 (controladora o tarjeta de 4 canales)</option>
+          <option value="2">Split mono: izquierda auriculares, derecha master</option>
+          <option value="0">Desactivados</option>
+        </select></label>
+    </section>
+    <section>
+      <h3>Mezcla</h3>
+      <label class="row" for="setXfCurve"><span>Curva del crossfader</span>
+        <select id="setXfCurve"><option value="0">Suave (potencia constante)</option><option value="1">Corte (scratch)</option></select></label>
+      <label class="row check" for="setAutoGain"><input type="checkbox" id="setAutoGain"><span>Ganancia automática (iguala el volumen de las pistas a −12 LUFS, con margen para no saturar)</span></label>
+      <label class="row check" for="setLimiter"><input type="checkbox" id="setLimiter"><span>Limitador en el master (evita la saturación digital)</span></label>
+    </section>
+    <section>
+      <h3>Atajos de teclado</h3>
+      <dl class="keys">
+        <dt>Z / M</dt><dd>Play / pausa plato 1 / 2</dd>
+        <dt>X / N</dt><dd>CUE plato 1 / 2</dd>
+        <dt>1–4 / 7–0</dt><dd>Hot cues A–D plato 1 / 2</dd>
+        <dt>Mayús + hot cue</dt><dd>Borrar hot cue</dd>
+        <dt>Supr</dt><dd>Quitar las pistas seleccionadas</dd>
+      </dl>
+    </section>
+    <div class="actions"><span class="version" id="version"></span><button class="btn primary" type="button" id="settingsClose">Cerrar</button></div>
+  </form>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,68 @@
+name: Compilar Cabina para macOS
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust para Apple Silicon e Intel
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Pruebas del motor de audio y del análisis
+        working-directory: src-tauri
+        run: cargo test --release --lib --locked
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Compilar la app universal (.app y .dmg)
+        run: npm run build:mac -- --ci
+
+      - name: Preparar descargas
+        run: |
+          mkdir -p dist
+          B=src-tauri/target/universal-apple-darwin/release/bundle
+          cp "$B"/dmg/*.dmg dist/
+          ditto -c -k --keepParent "$B/macos/Cabina.app" dist/Cabina-macOS.zip
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cabina-macOS
+          path: dist/*
+          retention-days: 30
+
+      - name: Publicar versión
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Cabina $GITHUB_REF_NAME" \
+            --notes "Descarga el .dmg, ábrelo y arrastra Cabina a Aplicaciones. La primera vez: clic derecho sobre Cabina → Abrir (la app no está firmada con un certificado de Apple)."
