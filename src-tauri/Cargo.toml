@@ -1,6 +1,6 @@
 [package]
 name = "cabina"
-version = "0.1.0"
+version = "0.2.0"
 description = "Cabina: software DJ con motor de audio nativo"
 edition = "2021"
 
@@ -21,6 +21,7 @@ cpal = "=0.16.0"
 symphonia = { version = "=0.5.5", features = ["mp3", "aac", "alac", "isomp4", "flac", "wav", "aiff", "pcm", "vorbis", "ogg", "opt-simd"] }
 rustfft = "=6.4.1"
 crossbeam-queue = "=0.3.12"
+ureq = { version = "=2.12.1", features = ["json"] }
 
 [profile.dev.package."*"]
 opt-level = 3

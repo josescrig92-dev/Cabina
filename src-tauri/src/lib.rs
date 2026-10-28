@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod engine;
 pub mod library;
+pub mod styles;
 
 use engine::host::{list_devices, AudioHost, HostStatus, BUFFER_SIZES};
 use engine::{now_ns, Command, TrackAudio};
@@ -21,6 +22,21 @@ const TARGET_LUFS: f64 = -12.0;
 struct Settings {
     device: Option<String>,
     buffer: Option<u32>,
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+fn save_settings(dir: &std::path::Path, s: &Settings) {
+    if let Ok(json) = serde_json::to_vec_pretty(s) {
+        let path = dir.join("settings.json");
+        let _ = std::fs::write(&path, json);
+        // contiene la clave de API: solo legible por el usuario
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 struct AppState {
@@ -30,6 +46,8 @@ struct AppState {
     loaded: Arc<Mutex<[Option<String>; 2]>>,
     settings: Mutex<Settings>,
     data_dir: PathBuf,
+    /// Hay una clasificación u organización en marcha
+    busy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,10 +422,218 @@ fn audio_configure(state: tauri::State<AppState>, device: Option<String>, buffer
         s.buffer = Some(buffer);
         s.clone()
     };
-    if let Ok(json) = serde_json::to_vec_pretty(&s) {
-        let _ = std::fs::write(state.data_dir.join("settings.json"), json);
-    }
+    save_settings(&state.data_dir, &s);
     state.host.configure(device, buffer);
+}
+
+// ---------------------------------------------------------------------------
+// Comandos: estilos y organización en carpetas
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StylesInfo {
+    styles: Vec<&'static str>,
+    unclassified: &'static str,
+    has_key: bool,
+    busy: bool,
+    batch: usize,
+}
+
+#[tauri::command]
+fn styles_info(state: tauri::State<AppState>) -> StylesInfo {
+    StylesInfo {
+        styles: styles::STYLES.to_vec(),
+        unclassified: styles::UNCLASSIFIED,
+        has_key: state.settings.lock().unwrap().api_key.as_deref().is_some_and(|k| !k.is_empty()),
+        busy: state.busy.load(Relaxed),
+        batch: styles::BATCH,
+    }
+}
+
+#[tauri::command]
+fn set_api_key(state: tauri::State<AppState>, key: String) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if !key.is_empty() && !key.starts_with("sk-ant-") {
+        return Err("La clave debe empezar por «sk-ant-». Cópiala entera desde la consola de Anthropic.".into());
+    }
+    let s = {
+        let mut s = state.settings.lock().unwrap();
+        s.api_key = if key.is_empty() { None } else { Some(key) };
+        s.clone()
+    };
+    save_settings(&state.data_dir, &s);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_track_style(state: tauri::State<AppState>, id: String, style: Option<String>) -> Result<Track, String> {
+    if let Some(st) = &style {
+        if st != styles::UNCLASSIFIED && !styles::STYLES.contains(&st.as_str()) {
+            return Err("Estilo desconocido".into());
+        }
+    }
+    let mut l = state.lib.lock().unwrap();
+    let t = l.get_mut(&id).ok_or("Pista no encontrada")?;
+    t.style_confidence = style.as_ref().map(|_| 1.0);
+    t.style = style;
+    let t = t.clone();
+    l.dirty = true;
+    Ok(t)
+}
+
+/// Clasifica por estilo las pistas indicadas (o todas las analizadas que aún no tienen estilo).
+/// Devuelve cuántas se van a clasificar; el progreso llega con el evento `styles-progress`.
+#[tauri::command]
+fn classify_styles(app: tauri::AppHandle, state: tauri::State<AppState>, ids: Option<Vec<String>>) -> Result<usize, String> {
+    let key = state.settings.lock().unwrap().api_key.clone().filter(|k| !k.is_empty()).ok_or("Falta la clave de API de Anthropic")?;
+    if state.busy.swap(true, Relaxed) {
+        return Err("Ya hay una clasificación u organización en marcha".into());
+    }
+    let inputs: Vec<styles::TrackInput> = {
+        let l = state.lib.lock().unwrap();
+        l.tracks
+            .iter()
+            .filter(|t| t.status == "ready")
+            .filter(|t| match &ids {
+                Some(ids) => ids.contains(&t.id),
+                None => t.style.is_none(),
+            })
+            .map(|t| styles::TrackInput {
+                id: t.id.clone(),
+                file: std::path::Path::new(&t.path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                title: t.title.clone(),
+                artist: t.artist.clone(),
+                album: t.album.clone(),
+                genre: t.genre.clone(),
+                bpm: t.bpm,
+                key: t.key.clone(),
+                duration: t.duration,
+            })
+            .collect()
+    };
+    let total = inputs.len();
+    if total == 0 {
+        state.busy.store(false, Relaxed);
+        return Ok(0);
+    }
+    let lib = state.lib.clone();
+    let busy = state.busy.clone();
+    thread::spawn(move || {
+        let batches: Vec<Vec<styles::TrackInput>> = inputs.chunks(styles::BATCH).map(|c| c.to_vec()).collect();
+        let queue = Arc::new(Mutex::new(batches.into_iter()));
+        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fatal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let errors = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _ = app.emit("styles-progress", serde_json::json!({ "done": 0, "total": total }));
+        // varios lotes a la vez: cada respuesta tarda unos segundos
+        thread::scope(|s| {
+            for _ in 0..4 {
+                let (queue, done, fatal, errors, lib, app, key) = (&queue, &done, &fatal, &errors, &lib, &app, &key);
+                s.spawn(move || loop {
+                    if fatal.lock().unwrap().is_some() {
+                        return;
+                    }
+                    let Some(batch) = queue.lock().unwrap().next() else { return };
+                    match styles::classify_batch(key, &batch) {
+                        Ok(results) => {
+                            let mut updated = vec![];
+                            {
+                                let mut l = lib.lock().unwrap();
+                                for r in results {
+                                    if let Some(t) = l.get_mut(&r.id) {
+                                        t.style = Some(r.style);
+                                        t.style_confidence = Some(r.confidence);
+                                        updated.push(t.clone());
+                                    }
+                                }
+                                l.dirty = true;
+                            }
+                            for t in &updated {
+                                let _ = app.emit("track-updated", t);
+                            }
+                        }
+                        Err(styles::ClassifyError::Auth(m)) => {
+                            *fatal.lock().unwrap() = Some(m);
+                            return;
+                        }
+                        Err(e) => {
+                            errors.fetch_add(batch.len(), Relaxed);
+                            eprintln!("clasificación: {e}");
+                            let _ = app.emit("styles-error", e.to_string());
+                        }
+                    }
+                    let d = done.fetch_add(batch.len(), Relaxed) + batch.len();
+                    let _ = app.emit("styles-progress", serde_json::json!({ "done": d, "total": total }));
+                });
+            }
+        });
+        let err = fatal.lock().unwrap().clone();
+        let _ = app.emit(
+            "styles-done",
+            serde_json::json!({ "total": total, "failed": errors.load(Relaxed), "error": err }),
+        );
+        busy.store(false, Relaxed);
+    });
+    Ok(total)
+}
+
+/// Copia o mueve las pistas a `dest/<estilo>/`. Devuelve enseguida; el resultado llega con `organize-done`.
+#[tauri::command]
+fn organize_folders(app: tauri::AppHandle, state: tauri::State<AppState>, dest: String, move_files: bool, ids: Option<Vec<String>>) -> Result<usize, String> {
+    let dest = PathBuf::from(dest);
+    if !dest.is_dir() {
+        return Err("La carpeta de destino no existe".into());
+    }
+    let loaded = state.loaded.lock().unwrap().clone();
+    let items: Vec<styles::OrganizeItem> = {
+        let l = state.lib.lock().unwrap();
+        l.tracks
+            .iter()
+            .filter(|t| t.status == "ready" || t.status == "missing")
+            .filter(|t| ids.as_ref().map_or(true, |ids| ids.contains(&t.id)))
+            // no se mueve una pista que está cargada en un plato
+            .filter(|t| !move_files || !loaded.iter().any(|l| l.as_deref() == Some(t.id.as_str())))
+            .map(|t| styles::OrganizeItem {
+                id: t.id.clone(),
+                path: t.path.clone(),
+                style: t.style.clone().unwrap_or_else(|| styles::UNCLASSIFIED.to_string()),
+            })
+            .collect()
+    };
+    if items.is_empty() {
+        return Err("No hay pistas que organizar".into());
+    }
+    if state.busy.swap(true, Relaxed) {
+        return Err("Ya hay una clasificación u organización en marcha".into());
+    }
+    let n = items.len();
+    let lib = state.lib.clone();
+    let busy = state.busy.clone();
+    thread::spawn(move || {
+        let mut last = std::time::Instant::now();
+        let rep = styles::organize(&items, &dest, move_files, |done, total, style| {
+            if last.elapsed().as_millis() > 100 || done == total {
+                last = std::time::Instant::now();
+                let _ = app.emit("organize-progress", serde_json::json!({ "done": done, "total": total, "style": style }));
+            }
+        });
+        if !rep.new_paths.is_empty() {
+            let mut l = lib.lock().unwrap();
+            for (id, p) in &rep.new_paths {
+                if let Some(t) = l.get_mut(id) {
+                    t.path = p.clone();
+                }
+            }
+            l.dirty = true;
+            let tracks = l.tracks.clone();
+            drop(l);
+            let _ = app.emit("library-reload", tracks.len());
+        }
+        let _ = app.emit("organize-done", &rep);
+        busy.store(false, Relaxed);
+    });
+    Ok(n)
 }
 
 #[tauri::command]
@@ -456,7 +682,7 @@ pub fn run() {
                     }
                 });
             }
-            app.manage(AppState { host, lib, jobs: tx, loaded: Arc::new(Mutex::new([None, None])), settings: Mutex::new(settings), data_dir });
+            app.manage(AppState { host, lib, jobs: tx, loaded: Arc::new(Mutex::new([None, None])), settings: Mutex::new(settings), data_dir, busy: Default::default() });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -480,6 +706,11 @@ pub fn run() {
             engine_state,
             audio_info,
             audio_configure,
+            styles_info,
+            set_api_key,
+            set_track_style,
+            classify_styles,
+            organize_folders,
             app_version
         ])
         .run(tauri::generate_context!())

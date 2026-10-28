@@ -23,6 +23,12 @@ Funciona en Mac con Apple Silicon e Intel (binario universal), macOS 11 o poster
 - Búsqueda, orden por columnas y lista virtualizada (miles de pistas sin ralentizarse).
 - Todo se guarda: cues, hot cues y correcciones de rejilla persisten entre sesiones.
 
+**Organizar por estilo**
+- Botón *Organizar por estilo* en la colección: Claude (la IA de Anthropic) asigna a cada pista uno de 32 estilos de DJ (Tech House, Deep House, Melodic House & Techno, Techno, Reggaeton…) a partir del artista, el título, las etiquetas, el BPM y el tono. El audio no sale del Mac.
+- Columna *Estilo* editable a mano; las asignaciones dudosas aparecen en cursiva.
+- Crea una carpeta por estilo copiando (o moviendo) los archivos, con una lista `.m3u8` en cada carpeta para importarla en Rekordbox.
+- Necesita una clave de API de Anthropic (console.anthropic.com → API Keys), que se guarda solo en el Mac. Coste orientativo: 1–2 $ por cada 1.000 pistas.
+
 **Platos**
 - Onda de 3 bandas (graves, medios, agudos) ampliada y vista general con marcas de frase cada 16 compases.
 - CUE al estilo CDJ (fijar, volver, pre-escucha manteniendo pulsado), 8 hot cues por pista.
@@ -83,6 +89,7 @@ cd src-tauri
 cargo test --release --lib                         # pruebas de DSP, platos, keylock, análisis
 cargo run --release --example analyze -- pista.mp3 # BPM, rejilla, tono y LUFS de archivos
 cargo run --release --example bench                # coste del motor en tiempo real
+ANTHROPIC_API_KEY=sk-ant-... cargo run --release --example classify -- *.mp3   # estilo de cada archivo
 ```
 
 Cada push a `main` compila la app en GitHub Actions (`.github/workflows/macos.yml`) y deja el `.dmg` en los artefactos. Al crear una etiqueta `v*` (por ejemplo `git tag v0.1.0 && git push --tags`) se publica además como *Release*.
@@ -99,6 +106,7 @@ src-tauri/src/
   engine/stretch.rs       puente con Signalsmith Stretch (C++)
   analysis.rs             decodificación, onda, BPM y rejilla, tono, LUFS
   library.rs              colección y guardado
+  styles.rs               clasificación por estilo (Claude) y carpetas por estilo
   lib.rs                  comandos que llama la interfaz
 src-tauri/vendor/         Signalsmith Stretch (licencia MIT)
 prototype/                primer prototipo web

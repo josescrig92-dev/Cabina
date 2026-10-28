@@ -42,6 +42,12 @@ pub struct Track {
     pub status: String,
     #[serde(default)]
     pub error: Option<String>,
+    /// Estilo para organizar la colección (de la lista de `styles::STYLES`)
+    #[serde(default)]
+    pub style: Option<String>,
+    /// Seguridad de la clasificación: 0..1 (1 = asignado a mano)
+    #[serde(default)]
+    pub style_confidence: Option<f64>,
 }
 
 fn empty_hot() -> Vec<Option<f64>> {
@@ -156,7 +162,7 @@ impl Library {
         for f in files {
             let path = f.to_string_lossy().to_string();
             let id = track_id(&path);
-            if self.get(&id).is_some() {
+            if self.get(&id).is_some() || self.tracks.iter().any(|t| t.path == path) {
                 continue;
             }
             let (artist, title) = names_from_file(&f);
@@ -179,6 +185,8 @@ impl Library {
                 plays: 0,
                 status: "pending".into(),
                 error: None,
+                style: None,
+                style_confidence: None,
             };
             self.tracks.push(t.clone());
             added.push(t);

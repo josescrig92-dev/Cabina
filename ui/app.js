@@ -44,7 +44,7 @@ const lib = { tracks: [], byId: new Map(), view: [], sort: store.get('sort', { k
 const COLS = [
   { key: 'idx', label: '#' }, { key: 'title', label: 'Título' }, { key: 'artist', label: 'Artista' },
   { key: 'bpm', label: 'BPM' }, { key: 'key', label: 'Tono' }, { key: 'duration', label: 'Tiempo' },
-  { key: 'genre', label: 'Género' }, { key: 'lufs', label: 'LUFS' }, { key: null, label: 'Cargar' },
+  { key: 'style', label: 'Estilo' }, { key: 'lufs', label: 'LUFS' }, { key: null, label: 'Cargar' },
 ];
 
 function camelotRel(a, b) {
@@ -71,6 +71,7 @@ function sortValue(t, key) {
     case 'key': { const m = /^(\d+)([AB])$/.exec(t.key || ''); return m ? +m[1] * 2 + (m[2] === 'B' ? 1 : 0) : 99; }
     case 'lufs': return t.lufs ?? -99;
     case 'title': case 'artist': case 'genre': return (t[key] || '').toLocaleLowerCase('es');
+    case 'style': return (t.style || '~').toLocaleLowerCase('es');
     default: return t[key] ?? 0;
   }
 }
@@ -78,7 +79,7 @@ function sortValue(t, key) {
 function refreshView() {
   const q = lib.q.trim().toLocaleLowerCase('es');
   let v = lib.tracks;
-  if (q) v = v.filter(t => `${t.title} ${t.artist} ${t.album} ${t.genre} ${t.key || ''} ${t.keyName || ''}`.toLocaleLowerCase('es').includes(q));
+  if (q) v = v.filter(t => `${t.title} ${t.artist} ${t.album} ${t.genre} ${t.style || ''} ${t.key || ''} ${t.keyName || ''}`.toLocaleLowerCase('es').includes(q));
   const { key, dir } = lib.sort;
   if (key && key !== 'idx') v = [...v].sort((a, b) => { const x = sortValue(a, key), y = sortValue(b, key); return (x < y ? -1 : x > y ? 1 : 0) * dir; });
   else v = [...v].sort((a, b) => ((a.added - b.added) || a.path.localeCompare(b.path)) * (dir || 1));
@@ -105,6 +106,15 @@ $('#thead').addEventListener('click', e => {
   refreshView();
 });
 
+const STYLES = { list: [], unclassified: 'Sin clasificar' };
+function styleCell(t) {
+  if (t.status !== 'ready' || !STYLES.list.length) return `<span class="dim">${esc(t.style || t.genre || '—')}</span>`;
+  const cls = !t.style ? 'none' : (t.styleConfidence ?? 1) < 0.5 ? 'unsure' : '';
+  const title = t.style ? `${t.style}${t.styleConfidence != null && t.styleConfidence < 1 ? ` · seguridad ${Math.round(t.styleConfidence * 100)} %` : ''}${t.genre ? ` · etiqueta: ${t.genre}` : ''}` : (t.genre ? `Sin estilo · etiqueta: ${t.genre}` : 'Sin estilo');
+  const opts = [...STYLES.list, STYLES.unclassified].map(s => `<option${s === t.style ? ' selected' : ''}>${esc(s)}</option>`).join('');
+  return `<select class="stylesel ${cls}" data-style-for="${t.id}" title="${esc(title)}" aria-label="Estilo">${t.style ? '' : `<option value="" selected>${esc(t.genre ? t.genre + ' ·' : '—')}</option>`}${opts}</select>`;
+}
+
 let rowsRaf = 0;
 function renderRows() {
   cancelAnimationFrame(rowsRaf);
@@ -127,7 +137,7 @@ function renderRows() {
       html += `<div class="${cls}" data-id="${t.id}" data-i="${i}">
         <div class="num dim">${i + 1}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div><div class="dim">${esc(t.artist)}</div>
         <div class="num">${t.bpm ? t.bpm.toFixed(2) : '—'}</div><div>${t.key ? `<span class="key ${rel}" title="${esc(t.keyName)}">${t.key}</span>` : '<span class="dim">—</span>'}</div>
-        <div class="num">${fmtDur(t.duration)}</div><div class="dim">${esc(t.genre)}</div><div class="num dim">${t.lufs != null ? t.lufs.toFixed(1) : '—'}</div><div>${last}</div></div>`;
+        <div class="num">${fmtDur(t.duration)}</div><div>${styleCell(t)}</div><div class="num dim">${t.lufs != null ? t.lufs.toFixed(1) : '—'}</div><div>${last}</div></div>`;
     }
     const rows = $('#rows');
     rows.style.transform = `translateY(${first * ROW_H}px)`;
@@ -144,8 +154,10 @@ function upsertTrack(t) {
   lib.byId.set(t.id, t);
   for (const d of decks) if (d.trackId === t.id) { d.track = t; deckMeta(d); }
   scheduleRefresh();
+  if (!org.el.hidden) schedulePaintOrganize();
 }
-let refreshTimer = 0;
+let refreshTimer = 0, orgTimer = 0;
+function schedulePaintOrganize() { if (!orgTimer) orgTimer = setTimeout(() => { orgTimer = 0; paintOrganize(); }, 150); }
 function scheduleRefresh() { if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = 0; refreshView(); }, 120); }
 
 async function loadLibrary() {
@@ -158,10 +170,16 @@ function updateSelButtons() {
   $('#removeBtn').hidden = $('#reanalyzeBtn').hidden = lib.sel.size === 0;
 }
 
+// Cambio manual de estilo
+$('#rows').addEventListener('change', async e => {
+  const sel = e.target.closest('[data-style-for]'); if (!sel) return;
+  try { upsertTrack(await invoke('set_track_style', { id: sel.dataset.styleFor, style: sel.value || null })); } catch (err) { fail(err); }
+});
+
 // Selección, carga y arrastre de filas
 $('#rows').addEventListener('click', e => {
   const lb = e.target.closest('[data-load]');
-  const row = e.target.closest('.row'); if (!row) return;
+  const row = e.target.closest('.row'); if (!row || e.target.closest('select')) return;
   if (lb) { loadToDeck(+lb.dataset.load, row.dataset.id); return; }
   const id = row.dataset.id, idx = +row.dataset.i;
   if (e.shiftKey && lib.anchor != null) {
@@ -186,7 +204,7 @@ $('#rows').addEventListener('dblclick', e => {
 let rowDrag = null;
 $('#rows').addEventListener('pointerdown', e => {
   const row = e.target.closest('.row');
-  if (!row || e.button !== 0 || e.target.closest('button')) return;
+  if (!row || e.button !== 0 || e.target.closest('button, select')) return;
   rowDrag = { id: row.dataset.id, x: e.clientX, y: e.clientY, active: false };
 });
 window.addEventListener('pointermove', e => {
@@ -811,7 +829,7 @@ $('#setLimiter').addEventListener('change', e => setParam('limiter', e.target.ch
 const HOT_KEYS = { '1': [0, 0], '2': [0, 1], '3': [0, 2], '4': [0, 3], '7': [1, 0], '8': [1, 1], '9': [1, 2], '0': [1, 3] };
 const held = new Set();
 document.addEventListener('keydown', e => {
-  if (e.target.matches('input[type=search], select') || e.metaKey || e.ctrlKey || !settingsEl.hidden) return;
+  if (e.target.matches('input[type=search], select') || e.metaKey || e.ctrlKey || !settingsEl.hidden || !$('#organize').hidden || e.target.matches('input, select')) return;
   const k = e.key.toLowerCase();
   if (e.repeat && (k === 'x' || k === 'n')) return;
   if (k === 'z') send(0, 'toggle');
@@ -852,6 +870,112 @@ listen('deck-loaded', e => { const d = decks[e.payload.deck]; d.loading = false;
 listen('deck-error', e => { const d = decks[e.payload.deck]; d.loading = false; deckMeta(d); toast(e.payload.message, true); });
 
 /* ======================================================================
+   Organizar por estilo
+   ====================================================================== */
+const org = { el: $('#organize'), dest: null, hasKey: false, busy: false };
+function setProgress(el, done, total, label) {
+  el.hidden = false;
+  $('i', el).style.width = `${total ? (done / total) * 100 : 0}%`;
+  $('span', el).textContent = label;
+}
+function paintOrganize() {
+  $('#keyBox').hidden = org.hasKey;
+  $('#keyOk').hidden = !org.hasKey;
+  const ready = lib.tracks.filter(t => t.status === 'ready');
+  const pending = ready.filter(t => !t.style).length;
+  $('#classifyNew').textContent = pending ? `Clasificar ${pending} ${pending === 1 ? 'pista' : 'pistas'} sin estilo` : 'Todas las pistas tienen estilo';
+  $('#classifyNew').disabled = !org.hasKey || !pending || org.busy;
+  $('#classifyAll').disabled = !org.hasKey || !ready.length || org.busy;
+  $('#runOrganize').disabled = !org.dest || !ready.length || org.busy;
+  const counts = new Map();
+  for (const t of ready) if (t.style) counts.set(t.style, (counts.get(t.style) || 0) + 1);
+  $('#styleChips').innerHTML = [...counts].sort((a, b) => b[1] - a[1])
+    .map(([s, n]) => `<button class="chip" type="button" data-chip="${esc(s)}" title="Ver estas pistas en la colección">${esc(s)}<b>${n}</b></button>`).join('');
+}
+async function refreshStylesInfo() {
+  try {
+    const info = await invoke('styles_info');
+    STYLES.list = info.styles; STYLES.unclassified = info.unclassified;
+    org.hasKey = info.hasKey; org.busy = info.busy;
+  } catch {}
+}
+$('#organizeBtn').addEventListener('click', async () => { await refreshStylesInfo(); paintOrganize(); org.el.hidden = false; });
+const closeOrganize = () => { org.el.hidden = true; $('#organizeBtn').focus(); };
+$('#organizeClose').addEventListener('click', closeOrganize);
+org.el.addEventListener('pointerdown', e => { if (e.target === org.el) closeOrganize(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !org.el.hidden) closeOrganize(); });
+$('#saveKey').addEventListener('click', async () => {
+  try {
+    await invoke('set_api_key', { key: $('#apiKey').value });
+    $('#apiKey').value = '';
+    await refreshStylesInfo(); paintOrganize();
+    if (org.hasKey) toast('Clave de API guardada');
+  } catch (e) { fail(e); }
+});
+$('#apiKey').addEventListener('keydown', e => { if (e.key === 'Enter') $('#saveKey').click(); });
+$('#changeKey').addEventListener('click', () => { org.hasKey = false; paintOrganize(); $('#apiKey').focus(); });
+async function classify(ids) {
+  try {
+    const n = await invoke('classify_styles', { ids });
+    if (!n) { toast('No hay pistas que clasificar'); return; }
+    org.busy = true; paintOrganize();
+    setProgress($('#clsProgress'), 0, n, `Clasificando 0 de ${n}…`);
+  } catch (e) { fail(e); }
+}
+$('#classifyNew').addEventListener('click', () => classify(null));
+$('#classifyAll').addEventListener('click', () => classify(lib.tracks.filter(t => t.status === 'ready').map(t => t.id)));
+$('#styleChips').addEventListener('click', e => {
+  const c = e.target.closest('[data-chip]'); if (!c) return;
+  $('#search').value = lib.q = c.dataset.chip;
+  refreshView(); closeOrganize();
+});
+$('#pickDest').addEventListener('click', async () => {
+  try {
+    const r = await pick({ directory: true, multiple: false, title: 'Elige dónde crear las carpetas por estilo' });
+    if (r) { org.dest = Array.isArray(r) ? r[0] : r; $('#destPath').textContent = org.dest; $('#destPath').title = org.dest; paintOrganize(); }
+  } catch (e) { fail(e); }
+});
+$('#runOrganize').addEventListener('click', async () => {
+  const moveFiles = $('#modeMove').checked;
+  try {
+    const n = await invoke('organize_folders', { dest: org.dest, moveFiles, ids: null });
+    org.busy = true; paintOrganize();
+    $('#orgResult').hidden = true;
+    setProgress($('#orgProgress'), 0, n, `${moveFiles ? 'Moviendo' : 'Copiando'} 0 de ${n}…`);
+  } catch (e) { fail(e); }
+});
+listen('styles-progress', e => {
+  const { done, total } = e.payload;
+  setProgress($('#clsProgress'), done, total, `Clasificando ${done} de ${total}…`);
+});
+let lastStyleErr = 0;
+listen('styles-error', e => { if (Date.now() - lastStyleErr > 5000) { lastStyleErr = Date.now(); toast(`Un lote falló: ${e.payload}`, true); } });
+listen('styles-done', e => {
+  const { total, failed, error } = e.payload;
+  org.busy = false;
+  const ok = total - failed;
+  setProgress($('#clsProgress'), total, total, error ? `Detenido: ${error}` : failed ? `Listo: ${ok} clasificadas, ${failed} sin respuesta (vuelve a pulsar para reintentarlas)` : `Listo: ${total} pistas clasificadas`);
+  if (error) fail(error);
+  paintOrganize(); refreshView();
+});
+listen('organize-progress', e => {
+  const { done, total, style } = e.payload;
+  setProgress($('#orgProgress'), done, total, done < total ? `${done} de ${total} · ${style}` : `${total} de ${total}`);
+});
+listen('organize-done', e => {
+  const r = e.payload;
+  org.busy = false; paintOrganize();
+  const n = r.copied + r.moved;
+  const res = $('#orgResult');
+  res.hidden = false;
+  res.classList.toggle('err', !n);
+  res.textContent = `Hecho: ${n} ${n === 1 ? 'pista' : 'pistas'} ${r.moved ? 'movidas' : 'copiadas'} en ${r.folders.length} ${r.folders.length === 1 ? 'carpeta' : 'carpetas'} dentro de ${r.dest}.`
+    + (r.missing ? ` ${r.missing} no se encontraron en el disco.` : '')
+    + (r.errors.length ? ` ${r.errors.length} errores: ${r.errors.slice(0, 3).join('; ')}` : '');
+});
+listen('library-reload', () => loadLibrary().catch(fail));
+
+/* ======================================================================
    Arranque
    ====================================================================== */
 (async () => {
@@ -860,6 +984,7 @@ listen('deck-error', e => { const d = decks[e.payload.deck]; d.loading = false; 
   try { $('#version').textContent = `Cabina ${await invoke('app_version')}`; } catch {}
   await refreshAudioInfo();
   setInterval(refreshAudioInfo, 3000);
+  await refreshStylesInfo();
   await loadLibrary().catch(fail);
   requestAnimationFrame(frame);
 })();

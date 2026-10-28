@@ -1,7 +1,7 @@
 {
   "name": "cabina",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Software DJ con motor de audio nativo",
   "scripts": {
     "dev": "tauri dev",
