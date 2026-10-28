@@ -63,6 +63,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber 2>/dev/null || gh release create "$GITHUB_REF_NAME" dist/* \
             --title "Cabina $GITHUB_REF_NAME" \
             --notes "Descarga el .dmg, ábrelo y arrastra Cabina a Aplicaciones. La primera vez: clic derecho sobre Cabina → Abrir (la app no está firmada con un certificado de Apple)."
