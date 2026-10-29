@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod engine;
 pub mod library;
+pub mod loops;
 pub mod styles;
 
 use engine::host::{list_devices, AudioHost, HostStatus, BUFFER_SIZES};
@@ -24,6 +25,9 @@ struct Settings {
     buffer: Option<u32>,
     #[serde(default)]
     api_key: Option<String>,
+    /// Servidor de generación de loops (compatible con OBSIDIAN Neural GPU Server)
+    #[serde(default)]
+    loop_server: Option<String>,
 }
 
 fn save_settings(dir: &std::path::Path, s: &Settings) {
@@ -48,6 +52,10 @@ struct AppState {
     data_dir: PathBuf,
     /// Hay una clasificación u organización en marcha
     busy: Arc<std::sync::atomic::AtomicBool>,
+    /// Hay un loop generándose (el servidor solo atiende uno a la vez)
+    generating: Arc<std::sync::atomic::AtomicBool>,
+    /// Carpeta donde se guardan los loops generados
+    loops_dir: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,9 +96,16 @@ fn analysis_worker(app: tauri::AppHandle, lib: Arc<Mutex<Library>>, rx: Arc<Mute
                 t.duration = a.duration;
                 t.bpm = a.bpm;
                 t.grid = a.grid;
+                if let Some(b) = t.gen_bpm.and_then(|g| loops::trust_bpm(a.bpm, g)) {
+                    // los loops generados empiezan en un beat: si la rejilla cae casi en 0, se deja en 0
+                    let beat = 60.0 / b;
+                    let g = a.grid.rem_euclid(beat);
+                    t.bpm = b;
+                    t.grid = if g < 0.08 * beat || g > 0.92 * beat { 0.0 } else { g };
+                }
                 // el cue empieza en el primer beat de la rejilla
                 if t.cue == 0.0 {
-                    t.cue = a.grid;
+                    t.cue = t.grid;
                 }
                 t.key = a.key;
                 t.key_name = a.key_name;
@@ -636,6 +651,112 @@ fn organize_folders(app: tauri::AppHandle, state: tauri::State<AppState>, dest: 
     Ok(n)
 }
 
+// ---------------------------------------------------------------------------
+// Comandos: loops generados con IA
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoopsInfo {
+    server: String,
+    models: &'static [loops::LoopModel],
+    snap_bpm: &'static [f64],
+    min_duration: u32,
+    max_duration: u32,
+    busy: bool,
+    dir: String,
+}
+
+fn loop_server(state: &AppState) -> String {
+    state.settings.lock().unwrap().loop_server.clone().unwrap_or_else(|| loops::DEFAULT_SERVER.into())
+}
+
+#[tauri::command]
+fn loops_info(state: tauri::State<AppState>) -> LoopsInfo {
+    LoopsInfo {
+        server: loop_server(&state),
+        models: loops::MODELS,
+        snap_bpm: loops::SNAP_BPM,
+        min_duration: loops::MIN_DURATION,
+        max_duration: loops::MAX_DURATION,
+        busy: state.generating.load(Relaxed),
+        dir: state.loops_dir.to_string_lossy().to_string(),
+    }
+}
+
+/// Guarda la dirección del servidor y comprueba que responde.
+#[tauri::command]
+async fn set_loop_server(state: tauri::State<'_, AppState>, url: String) -> Result<String, String> {
+    let url = loops::normalize_server(&url)?;
+    let s = {
+        let mut s = state.settings.lock().unwrap();
+        s.loop_server = Some(url.clone());
+        s.clone()
+    };
+    save_settings(&state.data_dir, &s);
+    let u = url.clone();
+    tauri::async_runtime::spawn_blocking(move || loops::check(&u)).await.map_err(|e| e.to_string())??;
+    Ok(url)
+}
+
+/// Pide un loop al servidor. Devuelve enseguida; el resultado llega con `loop-done` o `loop-error`.
+#[tauri::command]
+fn generate_loop(app: tauri::AppHandle, state: tauri::State<AppState>, prompt: String, model: String, bpm: Option<f64>, duration: u32, key: Option<String>) -> Result<(), String> {
+    let m = loops::model(&model).ok_or("Modelo desconocido")?;
+    if prompt.trim().is_empty() {
+        return Err("Escribe qué quieres que suene".into());
+    }
+    if let Some(b) = bpm {
+        if !(40.0..=250.0).contains(&b) {
+            return Err("BPM fuera de rango".into());
+        }
+    }
+    if state.generating.swap(true, Relaxed) {
+        return Err("Ya se está generando un loop".into());
+    }
+    let req = loops::LoopRequest { prompt, model: m.id.into(), bpm, duration, key };
+    let server = loop_server(&state);
+    let (lib, jobs, dir, generating) = (state.lib.clone(), state.jobs.clone(), state.loops_dir.clone(), state.generating.clone());
+    thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let res = loops::generate(&server, &req).and_then(|a| {
+            let name = loops::file_name(&req.prompt, a.bpm, a.seed);
+            loops::save(&dir, &name, &a.wav).map(|p| (p, a.bpm))
+        });
+        match res {
+            Ok((path, bpm)) => {
+                let added = {
+                    let mut l = lib.lock().unwrap();
+                    let mut added = l.add_paths(&[path]);
+                    if let Some(t) = added.first_mut() {
+                        t.gen_bpm = bpm;
+                        t.genre = "Loop IA".into();
+                        if let Some(lt) = l.get_mut(&t.id) {
+                            lt.gen_bpm = bpm;
+                            lt.genre = t.genre.clone();
+                        }
+                    }
+                    added
+                };
+                match added.into_iter().next() {
+                    Some(t) => {
+                        let _ = jobs.send(t.id.clone());
+                        let _ = app.emit("loop-done", serde_json::json!({ "track": t, "seconds": started.elapsed().as_secs_f64() }));
+                    }
+                    None => {
+                        let _ = app.emit("loop-error", "El loop se guardó, pero no se pudo añadir a la colección");
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = app.emit("loop-error", e);
+            }
+        }
+        generating.store(false, Relaxed);
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
@@ -654,6 +775,11 @@ pub fn run() {
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or_default();
+            let loops_dir = app
+                .path()
+                .audio_dir()
+                .map(|d| d.join("Cabina").join("Loops IA"))
+                .unwrap_or_else(|_| data_dir.join("loops"));
             let host = AudioHost::start(settings.device.clone(), settings.buffer.unwrap_or(256));
             let lib = Arc::new(Mutex::new(Library::open(data_dir.clone())));
 
@@ -682,7 +808,7 @@ pub fn run() {
                     }
                 });
             }
-            app.manage(AppState { host, lib, jobs: tx, loaded: Arc::new(Mutex::new([None, None])), settings: Mutex::new(settings), data_dir, busy: Default::default() });
+            app.manage(AppState { host, lib, jobs: tx, loaded: Arc::new(Mutex::new([None, None])), settings: Mutex::new(settings), data_dir, busy: Default::default(), generating: Default::default(), loops_dir });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -711,6 +837,9 @@ pub fn run() {
             set_track_style,
             classify_styles,
             organize_folders,
+            loops_info,
+            set_loop_server,
+            generate_loop,
             app_version
         ])
         .run(tauri::generate_context!())

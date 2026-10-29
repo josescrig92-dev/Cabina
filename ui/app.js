@@ -829,7 +829,7 @@ $('#setLimiter').addEventListener('change', e => setParam('limiter', e.target.ch
 const HOT_KEYS = { '1': [0, 0], '2': [0, 1], '3': [0, 2], '4': [0, 3], '7': [1, 0], '8': [1, 1], '9': [1, 2], '0': [1, 3] };
 const held = new Set();
 document.addEventListener('keydown', e => {
-  if (e.target.matches('input[type=search], select') || e.metaKey || e.ctrlKey || !settingsEl.hidden || !$('#organize').hidden || e.target.matches('input, select')) return;
+  if (e.target.matches('input[type=search], select') || e.metaKey || e.ctrlKey || !settingsEl.hidden || !$('#organize').hidden || !$('#loopgen').hidden || e.target.matches('input, select')) return;
   const k = e.key.toLowerCase();
   if (e.repeat && (k === 'x' || k === 'n')) return;
   if (k === 'z') send(0, 'toggle');
@@ -974,6 +974,116 @@ listen('organize-done', e => {
     + (r.errors.length ? ` ${r.errors.length} errores: ${r.errors.slice(0, 3).join('; ')}` : '');
 });
 listen('library-reload', () => loadLibrary().catch(fail));
+
+/* ======================================================================
+   Generar loops con IA (servidor compatible con OBSIDIAN Neural)
+   ====================================================================== */
+const NOTES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+const gen = { el: $('#loopgen'), info: null, busy: false, started: 0, timer: 0, autoLoop: new Set() };
+$('#loopKey').innerHTML = '<option value="">Sin tono</option>'
+  + NOTES.map(n => `<option value="${n}m">${n} menor</option>`).join('')
+  + NOTES.map(n => `<option value="${n}">${n} mayor</option>`).join('');
+const genModel = () => gen.info?.models.find(m => m.id === $('#loopModel').value);
+function paintLoopGen() {
+  const m = genModel();
+  $('#loopModelHint').textContent = m ? m.hint + (m.bars ? ` · 8 compases; el BPM se ajusta al más cercano de ${gen.info.snapBpm.join(', ')}` : '') : '';
+  $('#loopDurRow').hidden = !m || m.bars;
+  $('#loopDurVal').textContent = `${$('#loopDur').value} s`;
+  $('#loopRun').disabled = gen.busy || !$('#loopPrompt').value.trim();
+  $('#loopRun').textContent = gen.busy ? 'Generando…' : 'Generar';
+}
+function loopFromDeck(i) {
+  const d = decks[i], st = engine.state?.decks[i];
+  if (!d.track || !st) { toast(`El plato ${i + 1} está vacío`, true); return; }
+  $('#loopBpm').value = Math.round(st.bpm * st.rate);
+  $('#loopKey').value = d.track.keyName || '';
+}
+async function openLoopGen() {
+  try { gen.info = await invoke('loops_info'); } catch (e) { fail(e); return; }
+  gen.busy = gen.info.busy;
+  const sel = $('#loopModel');
+  if (!sel.options.length) {
+    sel.innerHTML = gen.info.models.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('');
+    sel.value = store.get('loopModel', gen.info.models[0].id);
+    if (!sel.value) sel.value = gen.info.models[0].id;
+    $('#loopDur').min = gen.info.minDuration; $('#loopDur').max = gen.info.maxDuration;
+    $('#loopDur').value = store.get('loopDur', 8);
+  }
+  $('#loopServer').value = gen.info.server;
+  $('#loopDir').textContent = `Los loops se guardan en ${gen.info.dir}`;
+  // por defecto, el tempo y el tono del plato que suena
+  const st = engine.state;
+  const src = decks.find(d => st?.decks[d.i].playing && d.track) || decks.find(d => d.track);
+  if (src && !gen.busy) loopFromDeck(src.i);
+  paintLoopGen();
+  gen.el.hidden = false;
+  $('#loopPrompt').focus();
+}
+$('#loopBtn').addEventListener('click', openLoopGen);
+const closeLoopGen = () => { gen.el.hidden = true; $('#loopBtn').focus(); };
+$('#loopClose').addEventListener('click', closeLoopGen);
+gen.el.addEventListener('pointerdown', e => { if (e.target === gen.el) closeLoopGen(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !gen.el.hidden) closeLoopGen(); });
+$('#loopModel').addEventListener('change', () => { store.set('loopModel', $('#loopModel').value); paintLoopGen(); });
+$('#loopDur').addEventListener('input', () => { store.set('loopDur', +$('#loopDur').value); paintLoopGen(); });
+$('#loopPrompt').addEventListener('input', paintLoopGen);
+$('#loopPrompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!$('#loopRun').disabled) $('#loopRun').click(); } });
+$$('[data-loop-from]').forEach(b => b.addEventListener('click', () => loopFromDeck(+b.dataset.loopFrom)));
+async function connectLoopServer() {
+  const st = $('#loopServerState');
+  st.textContent = 'Conectando…';
+  try {
+    const url = await invoke('set_loop_server', { url: $('#loopServer').value });
+    $('#loopServer').value = url;
+    st.textContent = `Conectado a ${url}`;
+    return true;
+  } catch (e) { st.textContent = String(e?.message ?? e); return false; }
+}
+$('#loopConnect').addEventListener('click', connectLoopServer);
+$('#loopServer').addEventListener('keydown', e => { if (e.key === 'Enter') connectLoopServer(); });
+function loopTick() {
+  const s = Math.round((Date.now() - gen.started) / 1000);
+  setProgress($('#loopProgress'), 0, 1, `Generando… ${s} s (puede tardar un par de minutos)`);
+}
+$('#loopRun').addEventListener('click', async () => {
+  const m = genModel();
+  const bpm = +$('#loopBpm').value;
+  if (!(bpm >= 60 && bpm <= 200)) { toast('El BPM debe estar entre 60 y 200', true); return; }
+  if ($('#loopServer').value.trim() !== gen.info.server && !(await connectLoopServer())) return;
+  try {
+    await invoke('generate_loop', { prompt: $('#loopPrompt').value, model: m.id, bpm, duration: +$('#loopDur').value, key: $('#loopKey').value || null });
+  } catch (e) { fail(e); return; }
+  gen.busy = true; gen.started = Date.now(); gen.target = $('#loopTarget').value;
+  $('#loopProgress').classList.add('busy');
+  loopTick(); clearInterval(gen.timer); gen.timer = setInterval(loopTick, 1000);
+  paintLoopGen();
+});
+function loopFinished(label) {
+  gen.busy = false; clearInterval(gen.timer);
+  $('#loopProgress').classList.remove('busy');
+  setProgress($('#loopProgress'), 1, 1, label);
+  paintLoopGen();
+}
+listen('loop-done', e => {
+  const { track, seconds } = e.payload;
+  upsertTrack(track);
+  gen.autoLoop.add(track.id);
+  if (gen.target !== '' && gen.target != null) pendingLoad.set(track.id, +gen.target);
+  loopFinished(`Listo en ${Math.round(seconds)} s: «${track.title}»${gen.target ? ` · se carga en el plato ${+gen.target + 1} al terminar el análisis` : ''}`);
+  toast(`Loop generado: ${track.title}`);
+});
+listen('loop-error', e => { loopFinished(`Error: ${e.payload}`); fail(e.payload); });
+// Al cargar un loop recién generado, se activa el loop sobre toda su longitud
+listen('deck-loaded', e => {
+  const { deck, id } = e.payload;
+  if (!gen.autoLoop.has(id)) return;
+  gen.autoLoop.delete(id);
+  const t = lib.byId.get(id);
+  if (!t?.bpm || !t.duration) return;
+  const beats = Math.floor((t.duration - t.grid) / (60 / t.bpm) + 0.02);
+  const bars = [32, 16, 8, 4, 2, 1].find(n => n * 4 <= beats);
+  if (bars) send(deck, 'loop', bars * 4);
+});
 
 /* ======================================================================
    Arranque

@@ -48,6 +48,9 @@ pub struct Track {
     /// Seguridad de la clasificación: 0..1 (1 = asignado a mano)
     #[serde(default)]
     pub style_confidence: Option<f64>,
+    /// Loop generado con IA: BPM con el que se generó (manda sobre el análisis si se parecen)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gen_bpm: Option<f64>,
 }
 
 fn empty_hot() -> Vec<Option<f64>> {
@@ -187,6 +190,7 @@ impl Library {
                 error: None,
                 style: None,
                 style_confidence: None,
+                gen_bpm: None,
             };
             self.tracks.push(t.clone());
             added.push(t);

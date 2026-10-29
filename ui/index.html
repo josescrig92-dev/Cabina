@@ -44,6 +44,7 @@
         <button class="btn" id="removeBtn" hidden>Quitar de la colección</button>
         <button class="btn" id="reanalyzeBtn" hidden>Reanalizar</button>
         <input id="search" class="search" type="search" placeholder="Buscar título, artista, tono…" autocomplete="off">
+        <button class="btn" id="loopBtn" title="Crear un loop nuevo con IA a partir de un texto">Generar loop</button>
         <button class="btn" id="organizeBtn" title="Clasificar las pistas por estilo y crear una carpeta por estilo">Organizar por estilo</button>
         <button class="btn" id="addFilesBtn">Añadir archivos</button>
         <button class="btn primary" id="addFolderBtn">Añadir carpeta</button>
@@ -94,6 +95,33 @@
       <p class="note">Cada carpeta lleva una lista .m3u8 con sus pistas. En Rekordbox: Archivo → Importar → Lista de reproducción.</p>
     </section>
     <div class="actions"><span></span><button class="btn primary" type="button" id="organizeClose">Cerrar</button></div>
+  </div>
+</div>
+
+<div class="modal" id="loopgen" hidden>
+  <div class="settings organize" role="dialog" aria-modal="true" aria-labelledby="loopTitle">
+    <h2 id="loopTitle">Generar loop</h2>
+    <p class="lead">Describe un sonido y la IA crea un loop nuevo a tu tempo. Cabina lo guarda, lo analiza y lo añade a la colección; si eliges un plato, lo carga ahí con el loop ya puesto.</p>
+    <section>
+      <h3>Servidor</h3>
+      <div class="keyrow"><input id="loopServer" type="text" placeholder="http://localhost:8000" autocomplete="off" spellcheck="false" aria-label="Dirección del servidor"><button class="btn" type="button" id="loopConnect">Conectar</button></div>
+      <p class="note" id="loopServerState">Necesitas tener en marcha OBSIDIAN Neural GPU Server (github.com/innermost47/obsidian-neural-gpu-server) en este Mac con Apple Silicon o en otro ordenador con GPU NVIDIA de tu red.</p>
+    </section>
+    <section>
+      <h3>Sonido</h3>
+      <textarea id="loopPrompt" rows="2" maxlength="300" placeholder="Por ejemplo: dark techno rumble kick, acid 303 bassline, deep house chord stabs…" spellcheck="false" aria-label="Qué quieres que suene"></textarea>
+      <label class="row" for="loopModel"><span>Modelo</span><select id="loopModel"></select></label>
+      <p class="note" id="loopModelHint"></p>
+      <label class="row" for="loopBpm"><span>BPM</span><span class="keyrow"><input id="loopBpm" type="number" min="60" max="200" step="1" value="124"><button class="btn small" type="button" data-loop-from="0" title="Usar el BPM y el tono del plato 1">Plato 1</button><button class="btn small" type="button" data-loop-from="1" title="Usar el BPM y el tono del plato 2">Plato 2</button></span></label>
+      <label class="row" for="loopKey"><span>Tono</span><select id="loopKey"></select></label>
+      <label class="row" for="loopDur" id="loopDurRow"><span>Duración</span><span class="keyrow"><input id="loopDur" type="range" min="2" max="30" step="1" value="8"><b class="num" id="loopDurVal">8 s</b></span></label>
+      <label class="row" for="loopTarget"><span>Al terminar</span>
+        <select id="loopTarget"><option value="">Solo añadir a la colección</option><option value="0">Cargar en el plato 1</option><option value="1">Cargar en el plato 2</option></select></label>
+    </section>
+    <div class="orgactions"><button class="btn primary" type="button" id="loopRun">Generar</button></div>
+    <div class="progress" id="loopProgress" hidden><i></i><span></span></div>
+    <p class="note" id="loopDir"></p>
+    <div class="actions"><span></span><button class="btn primary" type="button" id="loopClose">Cerrar</button></div>
   </div>
 </div>
 

@@ -29,6 +29,13 @@ Funciona en Mac con Apple Silicon e Intel (binario universal), macOS 11 o poster
 - Crea una carpeta por estilo copiando (o moviendo) los archivos, con una lista `.m3u8` en cada carpeta para importarla en Rekordbox.
 - Necesita una clave de API de Anthropic (console.anthropic.com → API Keys), que se guarda solo en el Mac. Coste orientativo: 1–2 $ por cada 1.000 pistas.
 
+**Generar loops con IA**
+- Botón *Generar loop* en la colección: describe un sonido ("dark techno rumble kick", "deep house chord stabs") y la IA crea un loop nuevo al BPM y en el tono que elijas (con un clic, los del plato que suena).
+- 9 modelos: Stable Audio Open 1.0 y Stable Audio 3 Medium (duración libre de 2 a 30 s) y siete especializados de 8 compases (Foundation-1, Audialab EDM Elements, RC Infinite Pianos, RC Vocal Textures, SAO Instrumental, StableBeaT, gluten_v1), que ajustan el BPM al más cercano de 100, 110, 120, 128, 130, 140 o 150.
+- El loop se guarda en `~/Music/Cabina/Loops IA/` como WAV, se analiza y entra en la colección con artista "IA" y género "Loop IA". Si eliges un plato, se carga ahí con el loop activado sobre toda su longitud.
+- La generación la hace un servidor propio compatible con [OBSIDIAN Neural GPU Server](https://github.com/innermost47/obsidian-neural-gpu-server) (`POST /process`), en el mismo Mac con Apple Silicon o en otro ordenador con GPU NVIDIA de tu red. Sin cuenta ni clave de API; nada sale de tu red. Arráncalo con `--host 0.0.0.0` si está en otro ordenador y pon su dirección en el panel (por defecto `http://localhost:8000`).
+- Los modelos tienen sus propias licencias (Stability AI Community License y las de cada modelo), que se aceptan al instalar el servidor.
+
 **Platos**
 - Onda de 3 bandas (graves, medios, agudos) ampliada y vista general con marcas de frase cada 16 compases.
 - CUE al estilo CDJ (fijar, volver, pre-escucha manteniendo pulsado), 8 hot cues por pista.
@@ -107,6 +114,7 @@ src-tauri/src/
   analysis.rs             decodificación, onda, BPM y rejilla, tono, LUFS
   library.rs              colección y guardado
   styles.rs               clasificación por estilo (Claude) y carpetas por estilo
+  loops.rs                generación de loops con IA (cliente del servidor OBSIDIAN Neural)
   lib.rs                  comandos que llama la interfaz
 src-tauri/vendor/         Signalsmith Stretch (licencia MIT)
 prototype/                primer prototipo web

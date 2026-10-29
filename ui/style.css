@@ -237,3 +237,9 @@ button { cursor: pointer; }
 .destpath { font-family: var(--f-mono); font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; user-select: text; -webkit-user-select: text; }
 .result { margin: 0; font-size: 13.5px; color: var(--ok); user-select: text; -webkit-user-select: text; }
 .result.err { color: var(--warn); }
+.organize textarea { resize: vertical; min-height: 54px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: inherit; color: inherit; user-select: text; -webkit-user-select: text; }
+.organize input[type=number] { flex: 0 0 76px; }
+.organize input[type=range] { flex: 1; padding: 0; border: 0; background: none; accent-color: var(--deck-1); }
+.progress.busy i { width: 35% !important; animation: loopbusy 1.4s ease-in-out infinite alternate; }
+@keyframes loopbusy { from { left: 0; } to { left: 65%; } }
+.organize .num { font-family: var(--f-mono); font-size: 12.5px; min-width: 3.5em; text-align: right; }
